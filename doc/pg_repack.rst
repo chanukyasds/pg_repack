@@ -123,6 +123,7 @@ Options:
   -Z, --no-analyze              don't analyze at end
   -k, --no-superuser-check      skip superuser checks in client
   -C, --exclude-extension       don't repack tables which belong to specific extension
+      --exclude-schema          don't repack tables in specific schema
       --exclude-table           don't repack specific table
       --exclude-parent-table    don't repack specific parent table and its inheritors
       --error-on-invalid-index  don't repack when invalid index is found
@@ -227,6 +228,10 @@ Reorg Options
 ``-C``, ``--exclude-extension``
     Skip tables that belong to the specified extension(s). Some extensions
     may heavily depend on such tables at planning time etc.
+
+``--exclude-schema``
+    Skip the specified schema(s) to repack. Multiple schemas may be skipped by
+    writing multiple ``--exclude-schema`` switches.
 
 ``--exclude-table``
     Skip the specified table(s) only to repack. Multiple tables may be skipped by
@@ -335,6 +340,10 @@ Move all indexes of table ``foo`` to tablespace ``tbs``::
 Move the specified index to tablespace ``tbs``::
 
     $ pg_repack -d test --index idx --tablespace tbs
+
+Skip the specified schema(s) to repack ``foo`` in database ``test``:: 
+
+    $ pg_repack -d test --exclude-schema foo
 
 Skip the specified table(s) to repack ``foo`` in schema ``schema`` in 
 the database ``test``::
