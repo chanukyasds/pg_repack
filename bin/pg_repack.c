@@ -371,11 +371,6 @@ main(int argc, char *argv[])
 				(errcode(EINVAL),
 				 errmsg("cannot repack specific table(s) in schema, use schema.table notation instead")));
 
-		if (schema_list.head && ( exclude_table_list.head || exclude_parent_table_list.head))
-			ereport(ERROR,
-				(errcode(EINVAL),
-				 errmsg("cannot exclude specific table(s) in schema, use schema.table notation instead")));
-
 		if (schema_list.head && exclude_schema_list.head)
 			ereport(ERROR,
 				(errcode(EINVAL),
@@ -385,11 +380,6 @@ main(int argc, char *argv[])
 			ereport(ERROR,
 				(errcode(EINVAL),
 				 errmsg("cannot specify --exclude-schema along with --table (-t), --parent-table (-I)")));
-
-		if (exclude_schema_list.head && (exclude_table_list.head || exclude_parent_table_list.head || exclude_extension_list.head))
-			ereport(ERROR,
-				(errcode(EINVAL),
-				 errmsg("cannot specify --exclude-schema along with --exclude-table, --exclude-parent-table and --exclude-extension (-C)")));
 
 		if (exclude_table_list.head && (table_list.head || parent_table_list.head || exclude_extension_list.head))
 			ereport(ERROR,
@@ -918,23 +908,29 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 			/* Construct excluded schema name placeholders to be used by PQexecParams */
 			appendStringInfo(&sql, "$%d", iparam + 1);
 			params[iparam++] = cell->val;
-			elog(INFO, "skipping schema \"%s\"", cell->val);
+			elog(INFO, "excluding schema \"%s\"", cell->val);
 			if (cell->next)
 				appendStringInfoString(&sql, ", ");
 		}
 		appendStringInfoString(&sql, ")");
 	}
-	else if (num_excluded_tables || num_excluded__parent_tables)
+	else
+	{
+		appendStringInfoString(&sql, "pkid IS NOT NULL");
+	}
+
+	// Handling excluded tables
+	if (num_excluded_tables || num_excluded__parent_tables)
 	{
 		if (exclude_table_list.head)
 		{	
-			appendStringInfoString(&sql, "(");
+			appendStringInfoString(&sql, " AND (");
 			for (cell = exclude_table_list.head; cell; cell = cell->next)
 			{
 				/* Construct exclude table name placeholders to be used by PQexecParams */
 				appendStringInfo(&sql, "relid <> $%d::regclass", iparam + 1);
 				params[iparam++] = cell->val;
-				elog(INFO, "skipping table \"%s\"", cell->val);
+				elog(INFO, "excluding table \"%s\"", cell->val);
 				if (cell->next)
 					appendStringInfoString(&sql, " AND ");
 			}
@@ -943,7 +939,7 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 		if (exclude_parent_table_list.head)
 		{	
 			if (exclude_table_list.head)
-				appendStringInfoString(&sql, "AND (");
+				appendStringInfoString(&sql, " AND (");
 			else
 				appendStringInfoString(&sql, " (");
 			for (cell = exclude_parent_table_list.head; cell; cell = cell->next)
@@ -953,18 +949,12 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 								 "relid <> ALL(repack.get_table_and_inheritors($%d::regclass))",
 								 iparam + 1);
 				params[iparam++] = cell->val;
-				elog(INFO, "skipping parent table \"%s\" with its inheritors", cell->val);
+				elog(INFO, "excluding table \"%s\" with its inheritors", cell->val);
 				if (cell->next)
 					appendStringInfoString(&sql, " AND ");
 			}
 			appendStringInfoString(&sql, ")");
 		}
-
-
-	}
-	else
-	{
-		appendStringInfoString(&sql, "pkid IS NOT NULL");
 	}
 
 	/* Exclude tables which belong to extensions */
