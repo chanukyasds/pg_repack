@@ -247,6 +247,8 @@ static SimpleStringList exclude_table_list = {NULL, NULL};
 static SimpleStringList exclude_parent_table_list = {NULL, NULL};
 static SimpleStringList	schema_list = {NULL, NULL};
 static SimpleStringList exclude_schema_list = {NULL, NULL};
+static SimpleStringList exclude_table_pattern_list = {NULL,NULL};
+static SimpleStringList exclude_parent_table_pattern_list = {NULL,NULL};
 static char				*orderby = NULL;
 static char				*tablespace = NULL;
 static bool				moveidx = false;
@@ -293,6 +295,8 @@ static pgut_option options[] =
 	{ 'l', 5, "exclude-schema", &exclude_schema_list },
 	{ 'l', 4, "exclude-table", &exclude_table_list },
 	{ 'l', 3, "exclude-parent-table", &exclude_parent_table_list },
+	{ 'l', 6, "exclude-table-pattern",&exclude_table_pattern_list},
+	{ 'l', 7, "exclude-parent-table-pattern", &exclude_parent_table_pattern_list},
 	{ 'b', 2, "error-on-invalid-index", &error_on_invalid_index },
 	{ 'i', 1, "switch-threshold", &switch_threshold },
 	{ 0 },
@@ -805,7 +809,9 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 							num_params,
 							num_excluded_extensions,
 							num_excluded_tables,
-							num_excluded__parent_tables;
+							num_excluded__parent_tables,
+							num_excluded_table_patterns,
+							num_excluded_parent_table_patterns;
 
 	
 
@@ -816,6 +822,8 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 	num_excluded_extensions = simple_string_list_size(exclude_extension_list);
 	num_excluded_tables = simple_string_list_size(exclude_table_list);
 	num_excluded__parent_tables = simple_string_list_size(exclude_parent_table_list);
+	num_excluded_table_patterns = simple_string_list_size(exclude_table_pattern_list);
+	num_excluded_parent_table_patterns =  simple_string_list_size(exclude_parent_table_pattern_list);
 
 	/* 1st param is the user-specified tablespace */
 	num_params = num_excluded_extensions +
@@ -824,7 +832,9 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 				 num_schemas +
 				 num_excluded_schemas+
 				 num_excluded_tables +
-				 num_excluded__parent_tables + 1;
+				 num_excluded__parent_tables +
+				 num_excluded_table_patterns +
+				 num_excluded_parent_table_patterns + 1;
 	params = pgut_malloc(num_params * sizeof(char *));
 
 	initStringInfo(&sql);
@@ -919,7 +929,7 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 		appendStringInfoString(&sql, "pkid IS NOT NULL");
 	}
 
-	// Handling excluded tables
+	/* Handling excluded tables */
 	if (num_excluded_tables || num_excluded__parent_tables)
 	{
 		if (exclude_table_list.head)
@@ -928,7 +938,7 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 			for (cell = exclude_table_list.head; cell; cell = cell->next)
 			{
 				/* Construct exclude table name placeholders to be used by PQexecParams */
-				appendStringInfo(&sql, "relid <> $%d::regclass", iparam + 1);
+				appendStringInfo(&sql, "relid <> $%d::regclass",iparam + 1);
 				params[iparam++] = cell->val;
 				elog(INFO, "excluding table \"%s\"", cell->val);
 				if (cell->next)
@@ -938,18 +948,48 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 		}
 		if (exclude_parent_table_list.head)
 		{	
-			if (exclude_table_list.head)
-				appendStringInfoString(&sql, " AND (");
-			else
-				appendStringInfoString(&sql, " (");
+			appendStringInfoString(&sql, " AND (");
 			for (cell = exclude_parent_table_list.head; cell; cell = cell->next)
 			{
 				/* Construct table name placeholders to be used by PQexecParams */
 				appendStringInfo(&sql,
-								 "relid <> ALL(repack.get_table_and_inheritors($%d::regclass))",
-								 iparam + 1);
+								 "relid <> ALL(repack.get_table_and_inheritors($%d::regclass))",iparam + 1);
 				params[iparam++] = cell->val;
 				elog(INFO, "excluding table \"%s\" with its inheritors", cell->val);
+				if (cell->next)
+					appendStringInfoString(&sql, " AND ");
+			}
+			appendStringInfoString(&sql, ")");
+		}
+	}
+
+	/* Handling excluded table pattern */
+	if (num_excluded_table_patterns || num_excluded_parent_table_patterns)
+	{
+		if (exclude_table_pattern_list.head)
+		{	
+			appendStringInfoString(&sql, " AND (");
+			for (cell = exclude_table_pattern_list.head; cell; cell = cell->next)
+			{
+				/* Construct exclude table pattern placeholders to be used by PQexecParams */
+				appendStringInfo(&sql, "relid NOT IN (SELECT oid FROM pg_class where relname LIKE lower($%d::text) AND relkind = 'r')", iparam + 1);
+				params[iparam++] = cell->val;
+				elog(INFO, "excluding table with pattern \"%s\"", cell->val);
+				if (cell->next)
+					appendStringInfoString(&sql, " AND ");
+			}
+			appendStringInfoString(&sql, ")");
+		}
+
+		if (exclude_parent_table_pattern_list.head)
+		{	
+			appendStringInfoString(&sql, " AND (");
+			for (cell = exclude_parent_table_pattern_list.head; cell; cell = cell->next)
+			{
+				/* Construct exclude parent table pattern placeholders to be used by PQexecParams */
+				appendStringInfo(&sql, "relid NOT IN (SELECT inhrelid FROM pg_catalog.pg_inherits WHERE inhparent IN (SELECT oid FROM pg_class where relname LIKE lower($%d::text) AND relkind = 'p'))", iparam + 1);
+				params[iparam++] = cell->val;
+				elog(INFO, "excluding parent table with pattern \"%s\"", cell->val);
 				if (cell->next)
 					appendStringInfoString(&sql, " AND ");
 			}
@@ -2491,26 +2531,28 @@ pgut_help(bool details)
 		return;
 
 	printf("Options:\n");
-	printf("  -a, --all                     repack all databases\n");
-	printf("  -t, --table=TABLE             repack specific table only\n");
-	printf("  -I, --parent-table=TABLE      repack specific parent table and its inheritors\n");
-	printf("  -c, --schema=SCHEMA           repack tables in specific schema only\n");
-	printf("  -s, --tablespace=TBLSPC       move repacked tables to a new tablespace\n");
-	printf("  -S, --moveidx                 move repacked indexes to TBLSPC too\n");
-	printf("  -o, --order-by=COLUMNS        order by columns instead of cluster keys\n");
-	printf("  -n, --no-order                do vacuum full instead of cluster\n");
-	printf("  -N, --dry-run                 print what would have been repacked\n");
-	printf("  -j, --jobs=NUM                Use this many parallel jobs for each table\n");
-	printf("  -i, --index=INDEX             move only the specified index\n");
-	printf("  -x, --only-indexes            move only indexes of the specified table\n");
-	printf("  -T, --wait-timeout=SECS       timeout to cancel other backends on conflict\n");
-	printf("  -D, --no-kill-backend         don't kill other backends when timed out\n");
-	printf("  -Z, --no-analyze              don't analyze at end\n");
-	printf("  -k, --no-superuser-check      skip superuser checks in client\n");
-	printf("  -C, --exclude-extension       don't repack tables which belong to specific extension\n");
-	printf("      --exclude-schema          don't repack tables in specific schema\n");
-	printf("      --exclude-table           don't repack specific table\n");
-	printf("      --exclude-parent-table    don't repack specific parent table and its inheritors\n");
-	printf("      --error-on-invalid-index  don't repack tables which belong to specific extension\n");
-	printf("      --switch-threshold    	switch tables when that many tuples are left to catchup\n");
+	printf("  -a, --all                     	repack all databases\n");
+	printf("  -t, --table=TABLE             	repack specific table only\n");
+	printf("  -I, --parent-table=TABLE      	repack specific parent table and its inheritors\n");
+	printf("  -c, --schema=SCHEMA           	repack tables in specific schema only\n");
+	printf("  -s, --tablespace=TBLSPC       	move repacked tables to a new tablespace\n");
+	printf("  -S, --moveidx                 	move repacked indexes to TBLSPC too\n");
+	printf("  -o, --order-by=COLUMNS        	order by columns instead of cluster keys\n");
+	printf("  -n, --no-order                	do vacuum full instead of cluster\n");
+	printf("  -N, --dry-run                 	print what would have been repacked\n");
+	printf("  -j, --jobs=NUM                	Use this many parallel jobs for each table\n");
+	printf("  -i, --index=INDEX             	move only the specified index\n");
+	printf("  -x, --only-indexes            	move only indexes of the specified table\n");
+	printf("  -T, --wait-timeout=SECS       	timeout to cancel other backends on conflict\n");
+	printf("  -D, --no-kill-backend         	don't kill other backends when timed out\n");
+	printf("  -Z, --no-analyze              	don't analyze at end\n");
+	printf("  -k, --no-superuser-check      	skip superuser checks in client\n");
+	printf("  -C, --exclude-extension       	don't repack tables which belong to specific extension\n");
+	printf("      --exclude-schema          	don't repack tables in specific schema\n");
+	printf("      --exclude-table           	don't repack specific table\n");
+	printf("      --exclude-parent-table    	don't repack specific parent table and its inheritors\n");
+	printf("      --exclude-table-pattern   	don't repack specific table having this pattern\n");
+	printf("      --exclude-parent-table-pattern    don't repack specific parent table and its inheritors having this pattern\n");
+	printf("      --error-on-invalid-index  	don't repack tables which belong to specific extension\n");
+	printf("      --switch-threshold    		switch tables when that many tuples are left to catchup\n");
 }
